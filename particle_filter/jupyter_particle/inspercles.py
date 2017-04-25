@@ -10,8 +10,13 @@ from pf import Particle
 from nav_msgs.msg import OccupancyGrid
 from occupancy_field import OccupancyField
 from helper_functions import angle_normalize, angle_diff
+import rayline
+import cv2
 
 particle_size = 7
+
+lines = None
+
 
 def convert_to_figure(xy_theta):
     """ 
@@ -72,7 +77,7 @@ def nb_draw_arrow(x, y, theta, ax, l = 15, color='y', headwidth=3.0, headlength=
     """
     deltax = l*math.cos(theta)
     deltay = l*math.sin(theta)
-    ax.arrow(x, y, deltax, deltay, head_width=headwidth, head_length=headlength, fc=color,  ec=color, width=width)
+    ax.arrow(x, y, deltax, deltay, head_width=headwidth, head_length=headlength, fc='k',  ec=color, width=width)
 
 def nb_draw_particle_cloud(particles, ax):
     """
@@ -81,12 +86,8 @@ def nb_draw_particle_cloud(particles, ax):
         ax - eixo
     """
     for p in particles:
-        try :
-            p.theta
-            nb_draw_arrow(p.x, p.y, p.theta, ax, particle_size, color='b')
-        except AttributeError:
-            nb_draw_arrow(p[0], p[1], p[2], ax, particle_size, color='b')
-        
+        nb_draw_arrow(p[0], p[1], p[2], ax, particle_size, color=np.random.rand(3,))
+
 def normalize_particles(particle_cloud):
     # 
     #global particle_cloud
@@ -194,15 +195,15 @@ def nb_cria_occupancy_field_image(occupancy_field, numpy_image):
 
 
 def nb_outside_image(x, y, img):
-    if x > img.shape[1] or x < 0:
+    if x >= img.shape[1] or x < 0:
         return True
-    if y > img.shape[0] or y < 0:
+    if y >= img.shape[0] or y < 0:
         return True
 
 def nb_found_obstacle(x, y, x0, y0, img):
     gray_value = 1.0 - img[x][y]/255.0
     if gray_value > free_thresh and gray_value < occupied_thresh:
-        return math.sqrt( (x0 - x)**2 + (y0 - x)**2 )
+        return math.sqrt( (x0 - x)**2 + (y0 - y)**2 )
 
         
     
@@ -221,12 +222,12 @@ def nb_find_discrete_line_versor(xa, ya, angle):
     versor = [deltax/delta, deltay/delta]
     # Um pouco ineficiente mas 'garante' que nao pularemos celulas
     for i in range(len(versor)):
-        versor[i]*=0.6
+        versor[i]*=0.9
     return versor
     
 
 
-def nb_simulate_lidar(robot_pose, angles, img):
+def nb_simulate_lidar(robot_pose, angles, img, retorno = None, output_image=True):
     """
         Simula a leitura `real` do LIDAR supondo que o robot esteja na robot_pose e com sensores nos angulos angles
         
@@ -242,11 +243,29 @@ def nb_simulate_lidar(robot_pose, angles, img):
     
     lidar_results = {}
     
-    result_img = np.zeros(img.shape)
-    result_img.fill(255) # Deixamos tudo branco
+
+    result_img = None
+    
+    if output_image:
+        if retorno == None:
+            result_img = np.zeros(img.shape)
+        else:
+            result_img = retorno
+
+        result_img.fill(255) # Deixamos tudo branco
+
     
     x0 = robot_pose[0]
     y0 = robot_pose[1]
+
+    # Se o robô simulado (que pode ser uma partícula) já estiver fora da imagem, retornamos zero
+    if nb_outside_image(int(x0), int(y0), img):
+        for a in angles:
+            lidar_results[a] = 0
+
+        return lidar_results, result_img
+
+
     
     for angulo in a:
         # Faz o angulo ser relativo ao robo
@@ -259,10 +278,11 @@ def nb_simulate_lidar(robot_pose, angles, img):
         #print("vers ", ang, "  " , vers)
 
         while (True):
-            result_img[int(y), int(x)] = 0 # Marcamos o raio na imagem y,x porque numpy e' linha, coluna
+            if output_image:
+                result_img[int(y), int(x)] = 0 # Marcamos o raio na imagem y,x porque numpy e' linha, coluna
             if nb_outside_image(int(x), int(y), img):
                 # A imagem acabou, nao achamos nada
-                lidar_results[angulo] = -1   
+                lidar_results[angulo] = 0
                 print("Outside at ",x ,"  ",y, "  for angle ", ang)
                 break
             dist = nb_found_obstacle(int(y), int(x), y0, x0, img)
@@ -280,3 +300,128 @@ def nb_simulate_lidar(robot_pose, angles, img):
 
             
     return lidar_results, result_img
+
+def canny_lines(img):
+    """
+        Retorna todos os segmentos de linha contidos numa imagem
+    """
+    np_image = img
+    canny = cv2.Canny(np_image, occupied_thresh*255, free_thresh*255)
+    #kernel = np.ones((5,5), np.uint8)
+    #canny = cv2.dilate(canny, kernel, iterations=1)
+    minLineLength=img.shape[1]/45
+    linhas = np.array([])
+    lines = cv2.HoughLinesP(image=canny,rho=0.02,theta=np.pi/1000, threshold=25,lines=linhas, minLineLength=minLineLength,maxLineGap=3)
+    return lines
+
+
+
+def intersecao_mais_proxima(ray_origin, ray_direction, lines):
+    """
+        Dentre as intereseçoes, acha a mais próxima
+    """
+    intersecoes = intersecao_linhas(ray_origin, ray_direction, lines)
+    x = ray_origin[0]
+    y = ray_origin[1]
+    dists = np.sqrt(np.power(intersecoes[:,0]-x,2)+ np.power(intersecoes[:,1]-y,2))
+    minimo = np.min(dists)
+    i, = np.where( dists==minimo )
+    i = i[0]
+    p_int = (intersecoes[i,0] , intersecoes[i, 1])
+    return dists[i], p_int
+    
+
+
+def intersecao_linhas(ray_origin, ray_direction, lines):
+    """
+        Acha todas as intersecoes entre o raio e as linhas dentro de um conjunto de linhas
+    """
+    results = []
+    for i in range(lines.shape[0]):
+        p1 = (lines[i][0][0], lines[i][0][1])
+        p2 = (lines[i][0][2], lines[i][0][3])
+        inter = rayline.lineRayIntersectionPoint(ray_origin, ray_direction, p1, p2)
+        #print("p1 ", p1)
+        #print("p2 ", p2)
+        #print("inter v2 ", inter[0])
+        results.append(inter[0])
+    return np.array(results, dtype=float)
+
+
+
+def nb_simulate_lidar_fast(robot_pose, angles, img, retorno = None, output_image=True):
+    """
+        Simula a leitura `real` do LIDAR supondo que o robot esteja na robot_pose e com sensores nos angulos angles
+        
+        Nao e' necessario fazer isso em seu projeto
+        
+        retorna uma lista de pontos de intersecao ou -1 se o sensor nao ler nada naquele angulo
+        
+    """
+    a = angles.copy()
+    theta = 2 # para ficar mais intuitivo
+    
+    #robot_pose[theta] = angle_normalize(robot_pose[theta])
+    
+    lidar_results = {}
+    
+
+    global lines
+
+    result_img = None
+    
+    if output_image:
+        if retorno == None:
+            result_img = np.zeros(img.shape)
+        else:
+            result_img = retorno
+
+        result_img.fill(255) # Deixamos tudo branco
+
+    if lines == None:
+        lines = canny_lines(img)
+
+    
+    x0 = robot_pose[0]
+    y0 = robot_pose[1]
+
+    # Se o robô simulado (que pode ser uma partícula) já estiver fora da imagem, retornamos zero
+    if nb_outside_image(int(x0), int(y0), img):
+        for a in angles:
+            lidar_results[a] = 0
+
+        return lidar_results, result_img
+
+
+    
+    for angulo in a:
+        # Faz o angulo ser relativo ao robo
+        ang = robot_pose[theta]+angulo
+        #print("Angle ", ang)
+        xa, ya = x0, y0
+        x = xa
+        y = ya
+        vers = nb_find_discrete_line_versor(xa, ya, ang)
+        #print("vers ", ang, "  " , vers)
+
+        ray_origin = (xa, ya)
+
+        ray_direction = vers
+
+
+        dist, ponto = intersecao_mais_proxima(ray_origin, ray_direction, lines)
+
+
+        lidar_results[angulo] = dist 
+
+        
+        if output_image == True:
+            cv2.line(result_img,(int(x),int(y)),(int(ponto[0]),int(ponto[1])),(0,0,0),1)
+            
+    return lidar_results, result_img
+
+
+
+
+
+

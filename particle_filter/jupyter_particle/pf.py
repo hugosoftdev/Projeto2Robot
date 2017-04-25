@@ -1,6 +1,9 @@
+#!/usr/bin/env python
+
 """
     Originally based on Olin's Paul Ruvolo's CompRobo 15:
     https://github.com/paulruvolo/comprobo15/
+
 """
 
 
