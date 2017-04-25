@@ -2,4 +2,4 @@
 
 
  Membros Hugo e Marcelo Prado:
- Os dois trabalharam em pair programming.
+ Os dois trabalharam em pair programming, alternando quem rodava.
